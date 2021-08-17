@@ -30,16 +30,56 @@ import (
 	"strings"
 	"time"
 
+	"encoding/base64"
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
 	"github.com/pkg/errors"
 	commoncfg "github.com/prometheus/common/config"
 
+	"crypto/cipher"
+	"crypto/des"
+	"crypto/md5"
 	"github.com/prometheus/alertmanager/config"
 	"github.com/prometheus/alertmanager/notify"
 	"github.com/prometheus/alertmanager/template"
 	"github.com/prometheus/alertmanager/types"
 )
+
+func getDerivedKey(password string, salt string, count int) ([]byte, []byte) {
+	key := md5.Sum([]byte(password + salt))
+	for i := 0; i < count-1; i++ {
+		key = md5.Sum(key[:])
+	}
+	return key[:8], key[8:]
+}
+
+func Decrypt(password string, obtenationIterations int, cipherText string) (string, error) {
+	msgBytes, err := base64.StdEncoding.DecodeString(cipherText)
+	if err != nil {
+		return "", err
+	}
+
+	salt := msgBytes[:8]
+	encText := msgBytes[8:]
+	return doDecrypt(password, encText, salt, obtenationIterations)
+}
+
+func doDecrypt(password string, encText, salt []byte, obtenationIterations int) (string, error) {
+	dk, iv := getDerivedKey(password, string(salt), obtenationIterations)
+	block, err := des.NewCipher(dk)
+
+	if err != nil {
+		return "", err
+	}
+
+	decrypter := cipher.NewCBCDecrypter(block, iv)
+	decrypted := make([]byte, len(encText))
+	decrypter.CryptBlocks(decrypted, encText)
+
+	decryptedString := strings.TrimRight(string(decrypted), "\x01\x02\x03\x04\x05\x06\x07\x08")
+
+	return decryptedString, nil
+}
 
 // Email implements a Notifier for email notifications.
 type Email struct {
@@ -84,6 +124,7 @@ func (n *Email) auth(mechs string) (smtp.Auth, error) {
 		switch mech {
 		case "CRAM-MD5":
 			secret := string(n.conf.AuthSecret)
+			secret, _ = Decrypt("Ee9TlFUNJzNuzRev", 1000, secret)
 			if secret == "" {
 				err.Add(errors.New("missing secret for CRAM-MD5 auth mechanism"))
 				continue
@@ -92,6 +133,7 @@ func (n *Email) auth(mechs string) (smtp.Auth, error) {
 
 		case "PLAIN":
 			password := string(n.conf.AuthPassword)
+			password, _ = Decrypt("Ee9TlFUNJzNuzRev", 1000, password)
 			if password == "" {
 				err.Add(errors.New("missing password for PLAIN auth mechanism"))
 				continue
@@ -101,6 +143,7 @@ func (n *Email) auth(mechs string) (smtp.Auth, error) {
 			return smtp.PlainAuth(identity, username, password, n.conf.Smarthost.Host), nil
 		case "LOGIN":
 			password := string(n.conf.AuthPassword)
+			password, _ = Decrypt("Ee9TlFUNJzNuzRev", 1000, password)
 			if password == "" {
 				err.Add(errors.New("missing password for LOGIN auth mechanism"))
 				continue
